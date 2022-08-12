@@ -8,7 +8,7 @@ async function bootstrap() {
     {
       transport: Transport.REDIS,
       options: {
-        host: 'localhost',
+        host: 'redis-local',
         port: 6379,
         retryAttempts: 5,
         retryDelay: 10,
