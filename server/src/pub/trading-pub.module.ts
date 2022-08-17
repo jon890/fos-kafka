@@ -2,8 +2,8 @@ import { Module } from '@nestjs/common';
 import { ClientsModule, Transport } from '@nestjs/microservices';
 import { INJECT_TOKEN } from 'src/constants/inject.token';
 import { OUTER_SERVICE } from 'src/constants/service.const';
-import { TradingHandler } from './trading.handler';
-import { TradingService } from './trading.service';
+import { TradingPubController } from './trading-pub.controller';
+import { TradingPubService } from './trading-pub.service';
 
 @Module({
   imports: [
@@ -20,8 +20,7 @@ import { TradingService } from './trading.service';
       },
     ]),
   ],
-  controllers: [TradingHandler],
-  providers: [TradingService],
-  exports: [ClientsModule, TradingService],
+  controllers: [TradingPubController],
+  providers: [TradingPubService],
 })
-export class TradingModule {}
+export class TradingPubModule {}

@@ -1,10 +1,8 @@
 import { Module } from '@nestjs/common';
-import { TradingRestModule } from './rest/trading-rest.module';
-import { TradingModule } from './trading/trading.module';
+import { TradingPubModule } from './pub/trading-pub.module';
+import { TradingSubModule } from './sub/trading-sub.module';
 
 @Module({
-  imports: [TradingRestModule, TradingModule],
-  controllers: [],
-  providers: [],
+  imports: [TradingPubModule, TradingSubModule],
 })
 export class AppModule {}
