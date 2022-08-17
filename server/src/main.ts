@@ -5,6 +5,7 @@ import { AppModule } from './app.module';
 import { enableSwagger } from './framework/enable-swagger';
 import { OUTER_SERVICE } from './constants/service.const';
 import { CustomRpcExceptionFilter } from './exception/custom-rpc-exception.filter';
+import Redis from 'ioredis';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -23,7 +24,7 @@ async function bootstrap() {
 
   await app.startAllMicroservices();
   await app.listen(3001, () => {
-    Logger.log('🔥 Nest Application Listening on http://localhost:3001');
+    Logger.debug('🔥 Nest Application Listening on http://localhost:3001');
   });
 }
 
