@@ -1,9 +1,10 @@
 import { Module } from '@nestjs/common';
-import RedisClient from './redis.client';
+import { TradingRestModule } from './rest/trading-rest.module';
+import { TradingModule } from './trading/trading.module';
 
 @Module({
-  imports: [],
+  imports: [TradingRestModule, TradingModule],
   controllers: [],
-  providers: [RedisClient],
+  providers: [],
 })
 export class AppModule {}
