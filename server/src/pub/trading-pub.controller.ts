@@ -1,4 +1,6 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Delete, Param, Post } from '@nestjs/common';
+import { TradingType } from 'src/constants/trading-type.const';
+import { CancelTradingEventParam } from 'src/dto/cancel-trading-event-param';
 import { CreateBuyDto } from 'src/dto/create-buy.dto';
 import { CreateSellDto } from 'src/dto/create-sell.dto';
 import { TradingPubService } from './trading-pub.service';
@@ -9,13 +11,37 @@ export class TradingPubController {
 
   @Post('/buy')
   emitBuyEvent(@Body() dto: CreateBuyDto) {
-    this.service.emitBuyEvent(dto);
+    dto.tradingType = TradingType.BUYING;
+    this.service.emitEvent(dto);
     return 'emit buy event';
   }
 
   @Post('/sell')
   emitSellEvent(@Body() dto: CreateSellDto) {
-    this.service.emitSellEvent(dto);
+    dto.tradingType = TradingType.SELLING;
+    this.service.emitEvent(dto);
     return 'emit sell event';
+  }
+
+  @Delete('/buy/:key')
+  emitCancelBuyEvent(@Param('key') key: string) {
+    const param: CancelTradingEventParam = {
+      userId: '1234', // todo from access token
+      key,
+      tradingType: TradingType.CANCEL_BUYING,
+    };
+    this.service.emitEvent(param);
+    return 'emit cancel buy event';
+  }
+
+  @Delete('/sell/:key')
+  emitCancelSellEvent(@Param('key') key: string) {
+    const param: CancelTradingEventParam = {
+      userId: '1234', // todo from access token
+      key,
+      tradingType: TradingType.CANCEL_SELLING,
+    };
+    this.service.emitEvent(param);
+    return 'emit cancel sell event';
   }
 }

@@ -3,13 +3,16 @@ import { TradingType } from 'src/constants/trading-type.const';
 
 export class BaseCreateTradingDto {
   @ApiProperty()
+  userId: string;
+
+  @ApiProperty()
   tradingType: TradingType;
 
   @ApiProperty()
   amount: number;
 
   @ApiProperty()
-  userId: string;
+  salePrice: number;
 
   constructor(partial: Partial<BaseCreateTradingDto>) {
     Object.assign(this, partial);

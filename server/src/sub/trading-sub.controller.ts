@@ -1,3 +1,4 @@
+import { throwStatement } from '@babel/types';
 import { Controller, Logger } from '@nestjs/common';
 import { EventPattern } from '@nestjs/microservices';
 import { EVENT_NAME } from 'src/constants/event-name.const';
@@ -9,10 +10,9 @@ export class TradingSubController {
 
   constructor(private readonly service: TradingSubService) {}
 
-  @EventPattern(EVENT_NAME.TRADING)
-  handleTradingEvent(data: Record<string, any>) {
-    this.logger.debug('Event Received');
-    this.logger.debug(data);
-    this.service.pushEvent(data);
-  }
+  // @EventPattern(EVENT_NAME.TRADING)
+  // handleTradingEvent(data: Record<string, any>) {
+  //   this.logger.debug('Event Received');
+  //   this.logger.debug(data);
+  // }
 }

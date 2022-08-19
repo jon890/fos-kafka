@@ -2,10 +2,9 @@ import { Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { MicroserviceOptions, Transport } from '@nestjs/microservices';
 import { AppModule } from './app.module';
-import { enableSwagger } from './framework/enable-swagger';
 import { OUTER_SERVICE } from './constants/service.const';
 import { CustomRpcExceptionFilter } from './exception/custom-rpc-exception.filter';
-import Redis from 'ioredis';
+import { enableSwagger } from './framework/enable-swagger';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
