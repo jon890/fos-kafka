@@ -104,71 +104,83 @@ export class TradingSubService {
     return this.redis.set(MTK_NEXT_CONTRACT_READY, state ? 1 : 0);
   }
 
-  private async beforeStackPush(nextItem: string) {
-    const [timestamp, jsonString] = nextItem.split('--');
+  deserialize(tradingItem: string) {
+    const [timestamp, jsonString] = tradingItem.split('--');
 
     const jsonKeys = jsonString.split(',').filter((_, idx) => idx % 2 === 0);
     const jsonValues = jsonString.split(',').filter((_, idx) => idx % 2 === 1);
 
-    const finalJson = {
+    const trading = {
       timestamp,
     } as any;
+
     jsonKeys.forEach((key, idx) => {
-      finalJson[key] = jsonValues[idx];
+      trading[key] = jsonValues[idx];
     });
 
-    if (finalJson.tradingType === TradingType.BUYING) {
+    return trading;
+  }
+
+  async findSellingOffers() {
+    const searchResult = (await this.redis.call(
+      'FT.SEARCH',
+      'matchingIdx',
+      '@tradingType:SELLING',
+      'SORTBY',
+      'salePrice',
+      'asc',
+    )) as any;
+
+    const [count, ...rows] = searchResult;
+
+    const ids = rows.filter((_, idx) => idx % 2 === 0);
+    const rowValues = rows.filter((_, idx) => idx % 2 === 1);
+
+    const sellingOffers = [];
+    for (let i = 0; i < count; i++) {
+      const sell = rowValues[i][3];
+      sellingOffers.push(JSON.parse(sell));
+    }
+
+    sellingOffers.sort((a, b) => {
+      const aPrice = Number(a.salePrice);
+      const bPrice = Number(b.salePrice);
+
+      const aTimestamp = Number(a.timestamp.split('-').join(''));
+      const bTimestamp = Number(b.timestamp.split('-').join(''));
+
+      if (aPrice > bPrice) {
+        return 1;
+      } else if (aPrice < bPrice) {
+        return -1;
+      } else {
+        return aTimestamp - bTimestamp;
+      }
+    });
+
+    return sellingOffers;
+  }
+
+  private async beforeStackPush(nextItem: string) {
+    const trading = this.deserialize(nextItem);
+
+    if (trading.tradingType === TradingType.BUYING) {
       // 체결 가능한지 여부
       // 사는 사람 체결 부분
-      const sellResult = (await this.redis.call(
-        'FT.SEARCH',
-        'matchingIdx',
-        '@tradingType:SELLING',
-        'SORTBY',
-        'salePrice',
-        'asc',
-      )) as any;
+      const sellingOffers = (await this.findSellingOffers()) as any;
 
+      // 아직 더 체결해야할 것이 있을지 체크하는 변수
       let mustRemainInStack = false;
-      if (sellResult) {
-        const [count, ...rows] = sellResult;
 
-        const ids = rows.filter((_, idx) => idx % 2 === 0);
-        const rowValues = rows.filter((_, idx) => idx % 2 === 1);
-
-        // console.log(ids);
-        // console.log(rowValues);
-
-        const sells = [];
-        for (let i = 0; i < count; i++) {
-          const sell = rowValues[i][3];
-          sells.push(JSON.parse(sell));
-        }
-
-        sells.sort((a, b) => {
-          const aPrice = Number(a.salePrice);
-          const bPrice = Number(b.salePrice);
-
-          const aTimestamp = Number(a.timestamp.split('-').join(''));
-          const bTimestamp = Number(b.timestamp.split('-').join(''));
-
-          if (aPrice > bPrice) {
-            return 1;
-          } else if (aPrice < bPrice) {
-            return -1;
-          } else {
-            return aTimestamp - bTimestamp;
-          }
-        });
-
+      if (sellingOffers) {
         // 정렬된 결과를 토대로 필요한 amount 만큼 부분 체결 진행
-        let totalAmount = Number(finalJson.amount);
+        let totalAmount = Number(trading.amount);
         //
-        let totalSaleIds = [];
+        const totalSaleIds = [];
         //
-        let updateSellItem = [null, null];
+        const updateSellItem = [null, null];
 
-        sells.some((sellItem) => {
+        sellingOffers.some((sellItem) => {
           if (totalAmount - sellItem.amount < 0) {
             updateSellItem[0] = sellItem.timestamp;
             updateSellItem[1] = sellItem.amount - totalAmount;
@@ -183,57 +195,63 @@ export class TradingSubService {
 
         // API 디비상에서 체결 결과 반영
 
-        for (let idx of totalSaleIds) {
-          await this.redis.del(`Sell_Stack:${idx}`);
+        for (const idx of totalSaleIds) {
+          this.deleteTradingInBuyStack(idx);
         }
 
         // 부분 차감 진행
-
         console.log(updateSellItem);
 
         if (updateSellItem[0] && updateSellItem[1]) {
-          await this.redis.call(
-            'JSON.SET',
-            `Sell_Stack:${updateSellItem[0]}`,
-            '$.amount',
-            `"${updateSellItem[1]}"`,
-          );
+          const [key, newAmount] = updateSellItem;
+          this.updateAmountInSellStack(key, newAmount);
         }
 
         // 더이상 체결할 판매 물량이 오히려 부족할 떄
         if (totalAmount > 0) {
           mustRemainInStack = true;
-          finalJson.amount = `${totalAmount}`;
+          trading.amount = `${totalAmount}`;
         }
-
-        console.log(sells);
       }
 
       if (mustRemainInStack) {
-        await this.redis.call(
-          // 'JSON.ARRAPPEND',
-          'JSON.SET',
-          `Buy_Stack:${finalJson.timestamp}`,
-          '$',
-          JSON.stringify(finalJson),
-        );
+        await this.addTradingInBuyStack(trading);
       }
-
-      await this.redis.set('Buy_Ready', '1');
-      await this.redis.set('Sell_Ready', '1');
-    } else if (finalJson.tradingType === TradingType.SELLING) {
-      await this.redis.set('Sell_Ready', '1');
-
-      await this.redis.call(
-        // 'JSON.ARRAPPEND',
-        'JSON.SET',
-        `Sell_Stack:${finalJson.timestamp}`,
-        '$',
-        JSON.stringify(finalJson),
-      );
-
-      await this.redis.set('Buy_Ready', '1');
+    } else if (trading.tradingType === TradingType.SELLING) {
+      await this.addTradingInSellStack(trading);
     }
+
+    await this.setNextContractReady(true);
+  }
+
+  updateAmountInSellStack(key: string, newAmount: number) {
+    return this.redis.call(
+      'JSON.SET',
+      `Sell_Stack:${key}`,
+      '$.amount',
+      `"${newAmount}"`,
+    );
+  }
+
+  deleteTradingInBuyStack(key: string) {
+    return this.redis.del(`Sell_Stack:${key}`);
+  }
+
+  addTradingInBuyStack(trading: any) {
+    return this.redis.call(
+      'JSON.SET',
+      `Buy_Stack:${trading.timestamp}`,
+      '$',
+      JSON.stringify(trading),
+    );
+  }
+  addTradingInSellStack(trading: any) {
+    return this.redis.call(
+      'JSON.SET',
+      `Sell_Stack:${trading.timestamp}`,
+      '$',
+      JSON.stringify(trading),
+    );
   }
 
   private async parseBoolean(redisKey: string) {
