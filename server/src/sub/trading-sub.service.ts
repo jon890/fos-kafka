@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import Redis from 'ioredis';
 import {
+  MTK_NEXT_CONTRACT_READY,
   MTK_TRADING_CONSUMER_BUY_PENDING,
   MTK_TRADING_GROUP_BUY,
+  MTK_TRADING_PENDING_DATA,
   MTK_TRADING_STREAM_KEY,
 } from 'src/constants/redis-key.const';
 import { TradingType } from 'src/constants/trading-type.const';
@@ -24,31 +26,18 @@ export class TradingSubService {
 
   async subscribeTradingEventStream() {
     console.log('Subscribe Trading Event Stream');
+
     while (true) {
-      const streams = (await this.redis.xreadgroup(
-        'GROUP',
-        MTK_TRADING_GROUP_BUY,
-        MTK_TRADING_CONSUMER_BUY_PENDING,
-        'STREAMS',
-        MTK_TRADING_STREAM_KEY,
-        '>',
-      )) as any;
+      const streams = (await this.readTradingStream()) as any;
 
       if (streams) {
-        let [[_streamKey, data]] = streams;
+        const [[_streamKey, data]] = streams;
         // 길이 2짜리 배열들의 배열
         // [[timestamp, [key,val]]]
         //console.log('key : ', data);
-        for (let datum of data) {
-          let [timestamp, ...keyvalues] = datum;
-          await this.redis.lpush(
-            'Buy_Pending',
-            `${timestamp}--${keyvalues.join(',')}`,
-          );
-          await this.redis.lpush(
-            'Sell_Pending',
-            `${timestamp}--${keyvalues.join(',')}`,
-          );
+        for (const datum of data) {
+          const [timestamp, ...keyvalues] = datum;
+          await this.addPendingData(timestamp, keyvalues);
         }
       }
 
@@ -56,31 +45,63 @@ export class TradingSubService {
     }
   }
 
+  /**
+   * 거래 스트림을 읽어온다
+   * @returns
+   */
+  readTradingStream() {
+    return this.redis.xreadgroup(
+      'GROUP',
+      MTK_TRADING_GROUP_BUY,
+      MTK_TRADING_CONSUMER_BUY_PENDING,
+      'STREAMS',
+      MTK_TRADING_STREAM_KEY,
+      '>',
+    );
+  }
+
+  /**
+   * 거래 체결을 기다리는 리스트로 추가
+   * @param timestamp
+   * @param keyvalues
+   * @returns
+   */
+  addPendingData(timestamp: string, keyvalues: string[]) {
+    return this.redis.lpush(
+      MTK_TRADING_PENDING_DATA,
+      `${timestamp}--${keyvalues.join(',')}`,
+    );
+  }
+
   async watchPending() {
-    if (!(await this.redis.exists('Buy_Ready'))) {
-      await this.redis.set('Buy_Ready', '1');
-    }
-    if (!(await this.redis.exists('Sell_Ready'))) {
-      await this.redis.set('Sell_Ready', '1');
-    }
+    await this.initFlags();
 
     while (true) {
-      if (
-        (await this.parseBoolean('Buy_Ready')) &&
-        (await this.parseBoolean('Sell_Ready'))
-      ) {
-        let buyPop = await this.redis.rpop('Buy_Pending');
-        let sellPop = await this.redis.rpop('Sell_Pending');
-
-        if (!buyPop || !sellPop) continue;
-
-        await this.redis.set('Buy_Ready', 0);
-        await this.redis.set('Sell_Ready', 0);
-
-        await this.beforeStackPush(buyPop);
+      const isReady = await this.parseBoolean(MTK_NEXT_CONTRACT_READY);
+      if (!isReady) {
+        await this.sleep(100);
+        continue;
       }
-      await this.sleep(100);
+
+      const trading = await this.redis.rpop(MTK_TRADING_PENDING_DATA);
+      if (!trading) {
+        await this.sleep(100);
+        continue;
+      }
+
+      await this.setNextContractReady(false);
+      await this.beforeStackPush(trading);
     }
+  }
+
+  async initFlags() {
+    if (!(await this.redis.exists(MTK_NEXT_CONTRACT_READY))) {
+      await this.redis.set(MTK_NEXT_CONTRACT_READY, 1);
+    }
+  }
+
+  setNextContractReady(state: boolean) {
+    return this.redis.set(MTK_NEXT_CONTRACT_READY, state ? 1 : 0);
   }
 
   private async beforeStackPush(nextItem: string) {
@@ -89,7 +110,7 @@ export class TradingSubService {
     const jsonKeys = jsonString.split(',').filter((_, idx) => idx % 2 === 0);
     const jsonValues = jsonString.split(',').filter((_, idx) => idx % 2 === 1);
 
-    let finalJson = {
+    const finalJson = {
       timestamp,
     } as any;
     jsonKeys.forEach((key, idx) => {
