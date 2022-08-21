@@ -50,6 +50,7 @@ export class RedisProvider {
       groupName: MTK_TRADING_GROUP_SELL,
       consumerName: MTK_TRADING_CONSUMER_SELL_PENDING,
     });
+    // this.createMatchingIndex();
   }
 
   async createMtkTradingStream(param: CreateGroupParam) {
@@ -70,6 +71,36 @@ export class RedisProvider {
       param.streamKey,
       param.groupName,
       param.consumerName,
+    );
+  }
+
+  createMatchingIndex() {
+    this.redis.call(
+      'FT.CREATE',
+      'matchingIdx',
+      'ON',
+      'JSON',
+      'SCHEMA',
+      '"$.timestamp"',
+      'as',
+      '"timestamp"',
+      'TEXT',
+      '"$.userId"',
+      'as',
+      '"userId"',
+      'TEXT',
+      '"$.tradingType"',
+      'as',
+      '"tradingType"',
+      'TEXT',
+      '"$.amount"',
+      'as',
+      '"amount"',
+      'TEXT',
+      '"$.salePrice"',
+      'as',
+      '"salePrice"',
+      'TEXT',
     );
   }
 

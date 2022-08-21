@@ -23,22 +23,28 @@ export class TradingPubController {
     return 'emit sell event';
   }
 
-  @Delete('/buy/:key')
-  emitCancelBuyEvent(@Param('key') key: string) {
+  @Delete('/buy/:key/:userId')
+  emitCancelBuyEvent(
+    @Param('key') key: string,
+    @Param('userId') userId: string,
+  ) {
     const param: CancelTradingEventParam = {
-      userId: '1234', // todo from access token
-      key,
+      userId, // todo from access token
+      timestamp: key,
       tradingType: TradingType.CANCEL_BUYING,
     };
     this.service.emitEvent(param);
     return 'emit cancel buy event';
   }
 
-  @Delete('/sell/:key')
-  emitCancelSellEvent(@Param('key') key: string) {
+  @Delete('/sell/:key/:userId')
+  emitCancelSellEvent(
+    @Param('key') key: string,
+    @Param('userId') userId: string,
+  ) {
     const param: CancelTradingEventParam = {
-      userId: '1234', // todo from access token
-      key,
+      userId, // todo from access token
+      timestamp: key,
       tradingType: TradingType.CANCEL_SELLING,
     };
     this.service.emitEvent(param);

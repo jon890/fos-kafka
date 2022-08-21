@@ -16,3 +16,10 @@ export const MTK_TRADING_PENDING_DATA = 'Trade_Pending';
  * 다음 체결될 데이터를 받을지 확인할 Flag 변수
  */
 export const MTK_NEXT_CONTRACT_READY = 'Next_Contract_Ready';
+
+/**
+ *
+ * Stack Name
+ */
+export const MTK_TRADING_BUY_STACK = 'Buy_Stack';
+export const MTK_TRADING_SELL_STACK = 'Sell_Stack';
