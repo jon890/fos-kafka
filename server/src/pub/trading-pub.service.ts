@@ -1,46 +1,41 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { ClientRedis } from '@nestjs/microservices';
-import Redis from 'ioredis';
 import { INJECT_TOKEN } from 'src/constants/inject.token';
-import { MTK_TRADING_STREAM_KEY } from 'src/constants/redis-key.const';
-import { RedisProvider } from 'src/redis/redis.provider';
+import {
+  TRADING_KEYPAIR_MTK,
+  TRADING_KEYPAIR_RARE,
+  TRADING_KEYPAIR_RESOURCE,
+} from 'src/constants/redis-key.const';
+import { TradingCategory } from 'src/constants/trading-type.const';
+import { RedisClientType } from 'src/redis/node-redis.provider';
 
 @Injectable()
 export class TradingPubService {
   private logger = new Logger(TradingPubService.name);
-  private redis: Redis;
 
   constructor(
-    @Inject(INJECT_TOKEN.TRADING_EVENT_CLIENT)
-    private tradingEventClient: ClientRedis,
-    private redisProvider: RedisProvider,
-  ) {
-    this.redis = redisProvider.get();
+    @Inject(INJECT_TOKEN.NODE_REDIS_PROVIDER)
+    private redis: RedisClientType,
+  ) {}
+
+  private valuesToStringInObject(obj: Record<string, any>) {
+    return Object.keys(obj).forEach((k) => {
+      const v = obj[k];
+      if (typeof v !== 'string') {
+        obj[k] = String(v);
+      }
+    });
   }
 
-  private dtoToStreamValues(obj: Object) {
-    return Object.keys(obj)
-      .map((key) => [key, obj[key]])
-      .flat();
+  emitEvent(obj: Record<string, any>) {
+    if (obj.tradingCategory === TradingCategory.MTK) {
+      this.valuesToStringInObject(obj);
+      return this.redis.xAdd(TRADING_KEYPAIR_MTK.STREAM_KEY, '*', obj);
+    } else if (obj.tradingCategory === TradingCategory.RESOURCE) {
+      this.valuesToStringInObject(obj);
+      return this.redis.xAdd(TRADING_KEYPAIR_RESOURCE.STREAM_KEY, '*', obj);
+    } else {
+      this.valuesToStringInObject(obj);
+      return this.redis.xAdd(TRADING_KEYPAIR_RARE.STREAM_KEY, '*', obj);
+    }
   }
-
-  emitEvent(obj: Object) {
-    return this.redis.xadd(
-      MTK_TRADING_STREAM_KEY,
-      '*', // auto generated key
-      ...this.dtoToStreamValues(obj),
-    );
-  }
-
-  // emitBuyEvent(dto: CreateBuyDto) {
-  //   return this.tradingEventClient
-  //     .emit<CreateBuyDto>(EVENT_NAME.TRADING, dto)
-  //     .pipe(tap(() => this.logger.debug('Emit User Buying Event')));
-  // }
-
-  // emitSellEvent(dto: CreateSellDto) {
-  //   return this.tradingEventClient
-  //     .emit<CreateBuyDto>(EVENT_NAME.TRADING, dto)
-  //     .pipe(tap(() => this.logger.debug('Emit User Selling Event')));
-  // }
 }

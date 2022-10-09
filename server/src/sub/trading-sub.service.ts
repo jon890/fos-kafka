@@ -1,428 +1,359 @@
 import { Injectable, Logger } from '@nestjs/common';
-import Redis from 'ioredis';
+import Decimal from 'decimal.js';
+import { Metaverse2ApiClient } from 'src/client/metaverse2-api.client';
 import {
-  MTK_NEXT_CONTRACT_READY,
-  MTK_TRADING_BUY_STACK,
-  MTK_TRADING_CONSUMER_BUY_PENDING,
-  MTK_TRADING_GROUP_BUY,
-  MTK_TRADING_PENDING_DATA,
-  MTK_TRADING_SELL_STACK,
-  MTK_TRADING_STREAM_KEY,
+  ENTIRE_KEYPAIR_LIST,
+  ENTIRE_KEYPAIR_MAP,
+  REDIS_TRADING_KEY_PAIR,
 } from 'src/constants/redis-key.const';
 import { TradingType } from 'src/constants/trading-type.const';
-import { RedisProvider } from 'src/redis/redis.provider';
+import { ResourceTrader, Trader } from 'src/dto/matching-request.dto';
+import { TradingPendingCancelItem } from 'src/dto/trading-pending-cancel.item';
+import { TradingPendingItem } from 'src/dto/trading-pending.item';
+import { TradingStackDto } from 'src/dto/trading-stack.dto';
+import { TradingSubRepository } from './trading-sub.repository';
 
 @Injectable()
 export class TradingSubService {
-  private redis: Redis;
+  private logger = new Logger(TradingSubService.name);
 
-  constructor(private readonly redisProvider: RedisProvider) {
-    this.redis = redisProvider.get();
-    this.subscribeTradingEventStream();
-    this.watchPending();
+  constructor(
+    private readonly repository: TradingSubRepository,
+    private readonly mv2ApiClient: Metaverse2ApiClient,
+  ) {
+    for (const keypair of ENTIRE_KEYPAIR_LIST) {
+      this.subscribeTradingEventStream(keypair);
+      this.watchPending(keypair);
+    }
+    // this.subscribeHandlingStreamSize();
   }
 
   sleep(millisec: number) {
     return new Promise((resolve) => setTimeout(resolve, millisec));
   }
 
-  async subscribeTradingEventStream() {
-    console.log('Subscribe Trading Event Stream');
+  /**
+   * Subscribe Trading Event Steam
+   */
+  async subscribeTradingEventStream(keypair: REDIS_TRADING_KEY_PAIR) {
+    this.logger.debug('MTK 거래 스트림 구독을 시작합니다');
 
     while (true) {
-      const streams = (await this.readTradingStream()) as any;
+      const streams = await this.repository.readTradingStream(keypair);
 
-      if (streams) {
-        const [[_streamKey, data]] = streams;
-        // 길이 2짜리 배열들의 배열
-        // [[timestamp, [key,val]]]
-        //console.log('key : ', data);
-        for (const datum of data) {
-          const [timestamp, ...keyvalues] = datum;
-          await this.addPendingData(timestamp, keyvalues);
-        }
+      if (streams.length === 0) {
+        await this.sleep(1000);
+        continue;
       }
 
+      for (const item of streams) {
+        await this.repository.addInPending(keypair.PENDING_DATA, item);
+      }
       await this.sleep(1000);
     }
   }
 
   /**
-   * 거래 스트림을 읽어온다
-   * @returns
+   * 거래가 체결될 데이터를 주기적으로 확인한다
    */
-  readTradingStream() {
-    return this.redis.xreadgroup(
-      'GROUP',
-      MTK_TRADING_GROUP_BUY,
-      MTK_TRADING_CONSUMER_BUY_PENDING,
-      'STREAMS',
-      MTK_TRADING_STREAM_KEY,
-      '>',
-    );
+  async watchPending(keypair: REDIS_TRADING_KEY_PAIR) {
+    await this.repository.initReadyFlag(keypair.NEXT_CONTRACT_READY);
+
+    while (true) {
+      const isReady = await this.repository.isReadyForNextPendingData(
+        keypair.NEXT_CONTRACT_READY,
+      );
+      if (!isReady) {
+        await this.sleep(10);
+        continue;
+      }
+
+      const trading = await this.repository.popPendingItem(
+        keypair.PENDING_DATA,
+      );
+      if (!trading) {
+        await this.sleep(10);
+        continue;
+      }
+
+      this.logger.debug('Send Pending Data');
+      this.logger.debug(JSON.stringify(trading));
+      await this.repository.waitContractProcessor(keypair.NEXT_CONTRACT_READY);
+      await this.handleContractProcessing(trading);
+      await this.repository.restartContractProcessor(
+        keypair.NEXT_CONTRACT_READY,
+      );
+    }
   }
 
   /**
-   * 거래 체결을 기다리는 리스트로 추가
-   * @param timestamp
-   * @param keyvalues
-   * @returns
+   * 체결 로직 수행
+   * @param item
    */
-  addPendingData(timestamp: string, keyvalues: string[]) {
-    return this.redis.lpush(
-      MTK_TRADING_PENDING_DATA,
-      `${timestamp}--${keyvalues.join(',')}`,
-    );
-  }
-
-  async watchPending() {
-    await this.initFlags();
-
-    while (true) {
-      const isReady = await this.parseBoolean(MTK_NEXT_CONTRACT_READY);
-      if (!isReady) {
-        await this.sleep(100);
-        continue;
-      }
-
-      const trading = await this.redis.rpop(MTK_TRADING_PENDING_DATA);
-      if (!trading) {
-        await this.sleep(100);
-        continue;
-      }
-
-      await this.setNextContractReady(false);
-      await this.beforeStackPush(trading);
-      await this.setNextContractReady(true);
-    }
-  }
-
-  async initFlags() {
-    if (!(await this.redis.exists(MTK_NEXT_CONTRACT_READY))) {
-      await this.redis.set(MTK_NEXT_CONTRACT_READY, 1);
-    }
-  }
-
-  setNextContractReady(state: boolean) {
-    return this.redis.set(MTK_NEXT_CONTRACT_READY, state ? 1 : 0);
-  }
-
-  deserialize(tradingItem: string) {
-    const [timestamp, jsonString] = tradingItem.split('--');
-
-    const jsonKeys = jsonString.split(',').filter((_, idx) => idx % 2 === 0);
-    const jsonValues = jsonString.split(',').filter((_, idx) => idx % 2 === 1);
-
-    const trading = {
-      timestamp,
-    } as any;
-
-    jsonKeys.forEach((key, idx) => {
-      trading[key] = jsonValues[idx];
-    });
-
-    return trading;
-  }
-
-  async findSellingOffers() {
-    const searchResult = (await this.redis.call(
-      'FT.SEARCH',
-      'matchingIdx',
-      '@tradingType:SELLING',
-      'SORTBY',
-      'salePrice',
-      'asc',
-    )) as any;
-
-    const [count, ...rows] = searchResult;
-
-    const ids = rows.filter((_, idx) => idx % 2 === 0);
-    const rowValues = rows.filter((_, idx) => idx % 2 === 1);
-
-    const sellingOffers = [];
-    for (let i = 0; i < count; i++) {
-      const sell = rowValues[i][3];
-      sellingOffers.push(JSON.parse(sell));
-    }
-
-    sellingOffers.sort((a, b) => {
-      const aPrice = Number(a.salePrice);
-      const bPrice = Number(b.salePrice);
-
-      const aTimestamp = Number(a.timestamp.split('-').join(''));
-      const bTimestamp = Number(b.timestamp.split('-').join(''));
-
-      if (aPrice - bPrice > Number.EPSILON) {
-        return 1;
-      } else if (aPrice - bPrice < Number.EPSILON) {
-        return -1;
-      } else {
-        return aTimestamp - bTimestamp;
-      }
-    });
-
-    Logger.debug(sellingOffers);
-
-    return sellingOffers;
-  }
-  async findBuyingOffers() {
-    const searchResult = (await this.redis.call(
-      'FT.SEARCH',
-      'matchingIdx',
-      '@tradingType:BUYING',
-      'SORTBY',
-      'salePrice',
-      'desc',
-    )) as any;
-
-    const [count, ...rows] = searchResult;
-
-    const ids = rows.filter((_, idx) => idx % 2 === 0);
-    const rowValues = rows.filter((_, idx) => idx % 2 === 1);
-
-    const buyingOffers = [];
-    for (let i = 0; i < count; i++) {
-      const sell = rowValues[i][3];
-      buyingOffers.push(JSON.parse(sell));
-    }
-
-    buyingOffers.sort((a, b) => {
-      const aPrice = Number(a.salePrice);
-      const bPrice = Number(b.salePrice);
-
-      const aTimestamp = Number(a.timestamp.split('-').join(''));
-      const bTimestamp = Number(b.timestamp.split('-').join(''));
-
-      if (aPrice - bPrice < Number.EPSILON) {
-        return 1;
-      } else if (aPrice - bPrice > Number.EPSILON) {
-        return -1;
-      } else {
-        return aTimestamp - bTimestamp;
-      }
-    });
-
-    Logger.debug(buyingOffers);
-
-    return buyingOffers;
-  }
-
-  private async beforeStackPush(nextItem: string) {
-    const trading = this.deserialize(nextItem);
-
-    if (trading.tradingType === TradingType.BUYING) {
-      // 체결 가능한지 여부
-      // 사는 사람 체결 부분
-      const sellingOffers = (await this.findSellingOffers()) as any[];
-
-      // 아직 더 체결해야할 것이 있을지 체크하는 변수
-      let mustRemainInStack = true;
-
-      if (sellingOffers.length > 0) {
-        // 정렬된 결과를 토대로 필요한 amount 만큼 부분 체결 진행
-        let totalAmount = Number(trading.amount);
-        //
-        const totalSaleIds = [];
-        //
-        const updateSellItem = [null, null];
-
-        sellingOffers.some((sellItem) => {
-          if (totalAmount - sellItem.amount < 0) {
-            updateSellItem[0] = sellItem.timestamp;
-            updateSellItem[1] = sellItem.amount - totalAmount;
-            totalAmount -= sellItem.amount;
-          } else if (totalAmount - sellItem.amount >= 0) {
-            totalSaleIds.push(sellItem.timestamp);
-            totalAmount -= sellItem.amount;
-          }
-
-          if (totalAmount <= 0) return true;
-        });
-
-        // API 디비상에서 체결 결과 반영
-
-        for (const idx of totalSaleIds) {
-          this.deleteTradingInSellStack(idx);
-        }
-
-        // 부분 차감 진행
-        console.log(updateSellItem);
-
-        if (updateSellItem[0] && updateSellItem[1]) {
-          const [key, newAmount] = updateSellItem;
-          this.updateAmountInSellStack(key, newAmount);
-        }
-
-        // 더이상 체결할 판매 물량이 오히려 부족할 떄
-        if (totalAmount > 0) {
-          trading.amount = `${totalAmount}`;
-        } else {
-          mustRemainInStack = false;
-        }
-      }
-
-      if (mustRemainInStack) {
-        await this.addTradingInBuyStack(trading);
-      }
-    } else if (trading.tradingType === TradingType.SELLING) {
-      // 체결 가능한지 여부
-      // 사는 사람 체결 부분
-      const buyingOffers = (await this.findBuyingOffers()) as any[];
-
-      // 아직 더 체결해야할 것이 있을지 체크하는 변수
-      let mustRemainInStack = true;
-
-      if (buyingOffers.length > 0) {
-        // 정렬된 결과를 토대로 필요한 amount 만큼 부분 체결 진행
-        let totalAmount = Number(trading.amount);
-        //
-        const completedOfferIds = [];
-        //
-        const updateBuyItem = [null, null];
-
-        buyingOffers.some((buyItem) => {
-          if (totalAmount - buyItem.amount < 0) {
-            updateBuyItem[0] = buyItem.timestamp;
-            updateBuyItem[1] = buyItem.amount - totalAmount;
-            totalAmount -= buyItem.amount;
-          } else if (totalAmount - buyItem.amount >= 0) {
-            completedOfferIds.push(buyItem.timestamp);
-            totalAmount -= buyItem.amount;
-          }
-
-          if (totalAmount <= 0) return true;
-        });
-
-        // API 디비상에서 체결 결과 반영
-
-        for (const idx of completedOfferIds) {
-          this.deleteTradingInBuyStack(idx);
-        }
-
-        // 부분 차감 진행
-        console.log(updateBuyItem);
-
-        if (updateBuyItem[0] && updateBuyItem[1]) {
-          const [key, newAmount] = updateBuyItem;
-          this.updateAmountInBuyStack(key, newAmount);
-        }
-
-        // 더이상 체결할 판매 물량이 오히려 부족할 떄
-        if (totalAmount > 0) {
-          trading.amount = `${totalAmount}`;
-        } else {
-          mustRemainInStack = false;
-        }
-      }
-
-      if (mustRemainInStack) {
-        await this.addTradingInSellStack(trading);
-      }
-    } else if (trading.tradingType === TradingType.CANCEL_BUYING) {
-      await this.cancelBuying(trading.userId, trading.timestamp);
-    } else if (trading.tradingType === TradingType.CANCEL_SELLING) {
-      await this.cancelSelling(trading.userId, trading.timestamp);
-    }
-  }
-
-  updateAmountInSellStack(key: string, newAmount: number) {
-    return this.redis.call(
-      'JSON.SET',
-      `${MTK_TRADING_SELL_STACK}:${key}`,
-      '$.amount',
-      `"${newAmount}"`,
-    );
-  }
-  updateAmountInBuyStack(key: string, newAmount: number) {
-    return this.redis.call(
-      'JSON.SET',
-      `${MTK_TRADING_BUY_STACK}:${key}`,
-      '$.amount',
-      `"${newAmount}"`,
-    );
-  }
-
-  deleteTradingInSellStack(key: string) {
-    return this.redis.del(`${MTK_TRADING_SELL_STACK}:${key}`);
-  }
-  deleteTradingInBuyStack(key: string) {
-    return this.redis.del(`${MTK_TRADING_BUY_STACK}:${key}`);
-  }
-
-  addTradingInBuyStack(trading: any) {
-    return this.redis.call(
-      'JSON.SET',
-      `${MTK_TRADING_BUY_STACK}:${trading.timestamp}`,
-      '$',
-      JSON.stringify(trading),
-    );
-  }
-  addTradingInSellStack(trading: any) {
-    return this.redis.call(
-      'JSON.SET',
-      `${MTK_TRADING_SELL_STACK}:${trading.timestamp}`,
-      '$',
-      JSON.stringify(trading),
-    );
-  }
-
-  private async parseBoolean(redisKey: string) {
-    return !!parseInt(await this.redis.get(redisKey));
-  }
-
-  async executeCancelTemplate(
-    userId: string,
-    key: string,
-    tradingType: TradingType,
-    callback?: () => Promise<void>,
+  private async handleContractProcessing(
+    item: TradingPendingItem | TradingPendingCancelItem,
   ) {
-    let prefix;
-    if (tradingType === TradingType.CANCEL_BUYING) {
-      prefix = MTK_TRADING_BUY_STACK;
-    } else if (tradingType === TradingType.CANCEL_SELLING) {
-      prefix = MTK_TRADING_SELL_STACK;
-    } else {
-      throw new Error('지원하지 않는 타입입니다');
-    }
-    const completeKey = `${prefix}:${key}`;
+    this.logger.debug('Trading Contract Processing!');
+    this.logger.debug(`Trading Type ===> ${item.tradingType}`);
 
-    const exist = await this.redis.exists(completeKey);
-
-    if (exist === 0) {
-      // todo error code
-      throw new Error('거래 내역이 존재하지 않습니다');
-    }
-
-    const [targetUserId] = JSON.parse(
-      (await this.redis.call('JSON.GET', completeKey, '$..userId')) as any,
-    );
-    console.log(targetUserId);
-    // const trading = this.deserialize(value);
-
-    if (targetUserId !== userId) {
-      throw new Error('본인만 지울 수 있습니다');
-    }
-
-    console.log('ccc');
-    await this.redis.del(completeKey);
-    if (callback) {
-      await callback();
+    switch (item.tradingType) {
+      case TradingType.BUYING:
+        await this.handleBuying(item);
+        break;
+      case TradingType.SELLING:
+        await this.handleSelling(item);
+        break;
+      case TradingType.CANCEL_BUYING:
+        await this.handleCancelBuying(item);
+        break;
+      case TradingType.CANCEL_SELLING:
+        await this.handleCancelSelling(item);
+        break;
     }
   }
 
-  async cancelBuying(userId: string, key: string) {
-    await this.executeCancelTemplate(
-      userId,
-      key,
-      TradingType.CANCEL_BUYING,
-      async () => {
-        // todo api 환불
-        return null;
+  /**
+   * 구매 처리
+   * @param item
+   */
+  private async handleBuying(item: TradingPendingItem) {
+    const sellingOffers = (
+      await this.repository.findSellingOffers(item)
+    ).reverse();
+
+    const completes: TradingStackDto[] = []; // 완전히 거래한 물품
+    let partial: TradingStackDto | null = null; // 부분적으로 거래한 물품
+    let partialAmount: number | null; // 부분적으로 거래한 물량
+    let latestPriceTracker: number | null = null; // 최근 거래가 반영 기록
+    let remainAmount = new Decimal(item.amount); // 내 물량 중 더 처리해야할 물량
+
+    while (sellingOffers.length) {
+      const selling = sellingOffers.pop();
+
+      if (remainAmount.minus(selling.amount).toNumber() >= 0) {
+        completes.push(selling);
+        remainAmount = remainAmount.minus(selling.amount);
+      } else {
+        partial = selling;
+        partialAmount = remainAmount.toNumber();
+        remainAmount = new Decimal(0);
+      }
+
+      latestPriceTracker = selling.price;
+      if (remainAmount.toNumber() === 0) {
+        break;
+      }
+    }
+    const targetCategory = ENTIRE_KEYPAIR_MAP[item.category];
+
+    try {
+      await Promise.all([
+        ...completes.map(({ id }) =>
+          this.repository.deleteTradingStackItem(
+            targetCategory.STACK.SELL_STACK,
+            id,
+          ),
+        ),
+        partial
+          ? this.repository.updateTradingStackItemAmount(
+              targetCategory.STACK.SELL_STACK,
+              partial.id,
+              new Decimal(partial.amount).minus(partialAmount).toNumber(),
+            )
+          : null,
+        remainAmount.toNumber() > 0
+          ? this.repository.addTradingStackItem(
+              targetCategory.STACK.BUY_STACK,
+              {
+                ...(item as any),
+                amount: remainAmount.toNumber(),
+              },
+            )
+          : null,
+        latestPriceTracker
+          ? this.repository.updateLatestConfirmedPrice(
+              latestPriceTracker,
+              item.category,
+              item.type,
+            )
+          : null,
+      ]);
+
+      // 서비스의 체결 API 호출
+      const sellers: Trader[] | ResourceTrader[] = completes.map((it) =>
+        it.toTrader(),
+      );
+
+      if (partial) {
+        sellers.push({
+          ...partial.toTrader(),
+          amount: partialAmount,
+        });
+      }
+
+      if (sellers.length) {
+        await this.mv2ApiClient.requestWriteMatchings(
+          {
+            tradingType: TradingType.BUYING,
+            type: Number(item.type),
+            buyers: [
+              {
+                ...item.toTrader(),
+                amount: new Decimal(item.amount).minus(remainAmount).toNumber(),
+              },
+            ],
+            sellers,
+          },
+          item.category,
+        );
+      }
+    } catch (e) {
+      this.logger.error('에러가 발생했습니다');
+      this.logger.error(JSON.stringify(e));
+      console.log(e);
+      return;
+    }
+  }
+
+  /**
+   * 판매 처리
+   * @param item
+   */
+  async handleSelling(item: TradingPendingItem) {
+    const buyingOffers = (
+      await this.repository.findBuyingOffers(item)
+    ).reverse();
+
+    const completes: TradingStackDto[] = []; // 완전히 거래한 물품
+    let partial: TradingStackDto | null = null; // 부분적으로 거래한 물품
+    let partialAmount: number | null; // 부분적으로 거래한 물량
+    let latestPriceTracker: number | null = null; // 최근 거래가 반영 기록
+    let remainAmount = new Decimal(item.amount); // 내 물량 중 더 처리해야할 물량
+
+    while (buyingOffers.length) {
+      const buyings = buyingOffers.pop();
+
+      if (remainAmount.minus(buyings.amount).toNumber() >= 0) {
+        completes.push(buyings);
+        remainAmount = remainAmount.minus(buyings.amount);
+      } else {
+        partial = buyings;
+        partialAmount = remainAmount.toNumber();
+        remainAmount = new Decimal(0);
+      }
+
+      latestPriceTracker = buyings.price;
+      if (remainAmount.toNumber() === 0) {
+        break;
+      }
+    }
+    const targetCategory = ENTIRE_KEYPAIR_MAP[item.category];
+
+    try {
+      await Promise.all([
+        ...completes.map(({ id }) =>
+          this.repository.deleteTradingStackItem(
+            targetCategory.STACK.BUY_STACK,
+            id,
+          ),
+        ),
+        partial
+          ? this.repository.updateTradingStackItemAmount(
+              targetCategory.STACK.BUY_STACK,
+              partial.id,
+              new Decimal(partial.amount).minus(partialAmount).toNumber(),
+            )
+          : null,
+        remainAmount.toNumber() > 0
+          ? this.repository.addTradingStackItem(
+              targetCategory.STACK.SELL_STACK,
+              {
+                ...(item as any),
+                amount: remainAmount.toNumber(),
+              },
+            )
+          : null,
+        latestPriceTracker
+          ? this.repository.updateLatestConfirmedPrice(
+              latestPriceTracker,
+              item.category,
+              item.type,
+            )
+          : null,
+      ]);
+
+      // 서비스의 체결 API 호출
+      const buyers: Trader[] | ResourceTrader[] = completes.map((it) =>
+        it.toTrader(),
+      );
+      if (partial) {
+        buyers.push({
+          ...partial.toTrader(),
+          amount: partialAmount,
+        });
+      }
+
+      if (buyers.length) {
+        await this.mv2ApiClient.requestWriteMatchings(
+          {
+            tradingType: TradingType.SELLING,
+            type: Number(item.type),
+            sellers: [
+              {
+                ...item.toTrader(),
+                amount: new Decimal(item.amount).minus(remainAmount).toNumber(),
+              },
+            ],
+            buyers,
+          },
+          item.category,
+        );
+      }
+    } catch (e) {
+      this.logger.error('에러가 발생했습니다');
+      this.logger.error(JSON.stringify(e));
+      console.log(e);
+      return;
+    }
+  }
+
+  /**
+   * 구매 취소 처리
+   */
+  async handleCancelBuying(trading: TradingPendingCancelItem) {
+    await this.repository.executeTradingCancelTemplate(
+      trading,
+      async (amount, type) => {
+        trading.amount = amount;
+        if (type) trading.type = type;
+        await this.mv2ApiClient.requestTransactionCancelRedis(trading);
       },
     );
   }
 
-  async cancelSelling(userId: string, key: string) {
-    await this.executeCancelTemplate(userId, key, TradingType.CANCEL_SELLING);
+  /**
+   * 판매 취소 처리
+   */
+  async handleCancelSelling(trading: TradingPendingCancelItem) {
+    await this.repository.executeTradingCancelTemplate(
+      trading,
+      async (amount, type) => {
+        // TODO: tradingpendingcancelitem 은 amount/price 가 존재하지 않음 레디스에서 가져와서 써야함 단순 상속불가
+        trading.amount = amount;
+        if (type) trading.type = type;
+        await this.mv2ApiClient.requestTransactionCancelRedis(trading);
+      },
+    );
+  }
+
+  /**
+   * 전체 Stream size trim
+   */
+  async subscribeHandlingStreamSize() {
+    while (true) {
+      await this.repository.handleCurrentTradingStreamSize();
+
+      await this.sleep(1000 * 60 * 10);
+    }
   }
 }

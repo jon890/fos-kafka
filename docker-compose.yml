@@ -5,7 +5,7 @@ services:
     container_name: redis-local
     image: redis/redis-stack-server:latest
     ports:
-      - 6379:6379
+      - "6379:6379"
     restart: unless-stopped
     command: redis-server /usr/local/conf/redis.conf
     networks:
@@ -20,15 +20,16 @@ services:
       dockerfile: ./Dockerfile
     restart: unless-stopped
     ports:
-      - 3001:3001
+      - "3001:3001"
     environment:
       - TZ=Asia/Seoul
     networks:
       - trading_network
     command: npm run start:dev
     volumes:
-      - ./server/node_modules:/app/node_modules
+      - /app/node_modules
       - ./server/src:/app/src
+      - ./server/env:/app/env
 
 networks:
   trading_network:
