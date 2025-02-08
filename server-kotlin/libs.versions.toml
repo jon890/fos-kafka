@@ -1,0 +1,9 @@
+[versions]
+kotlin = "2.1.10"
+springBoot = "3.4.2"
+springDependencyManagement = "1.1.7"
+
+[libraries]
+spring-data-jpa = { module = "org.springframework.boot:spring-boot-starter-data-jpa", version.ref = "springBoot" }
+spring-data-redis = { module = "org.springframework.boot:spring-boot-starter-data-redis",  version.ref = "springBoot"}
+spring-boot-web = { module = "org.springframework.boot:spring-boot-starter-web",  version.ref = "springBoot"}
