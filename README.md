@@ -16,3 +16,9 @@ npm install
 ```
 
 - 후 사용 바람
+
+
+## 2025 version 스프링 + 코틀린 버전으로 작성
+
+- spring boot 3, kotlin 버전으로 작성
+- 메시지 큐 or Redis등 자유롭게 인프라를 변경할 수 있도록 구성
