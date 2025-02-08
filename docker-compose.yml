@@ -14,9 +14,10 @@ services:
       - ./redis/data:/data
       - ./redis/redis.conf:/usr/local/conf/redis.conf
 
+  # 개발시에는 도커 컴포즈로 안띄우고 인프라만 띄우도록 변경
   server:
     build:
-      context: ./server
+      context: ./server-nest
       dockerfile: ./Dockerfile
     restart: unless-stopped
     ports:
